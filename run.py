@@ -9,7 +9,7 @@ num_classes = 100
 input_shape = (32, 32, 3)
 
 if __name__ == '__main__':
-    (x_train, y_train), (x_test, y_test) = keras.dataset.cifar100.load_data()
+    (x_train, y_train), (x_test, y_test) = keras.datasets.cifar100.load_data()
     x_train, x_test = x_train/255., x_test/255.
     y_train = keras.utils.to_categorical(y_train, num_classes)
     y_test = keras.utils.to_categorical(y_test, num_classes)
@@ -23,7 +23,7 @@ if __name__ == '__main__':
         plt.xticks([])
         plt.yticks([])
         plt.grid(False)
-        plt.imsho(x_train[i])
+        plt.imshow(x_train[i])
     plt.show()
 
     # hyperparameters

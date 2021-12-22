@@ -1,4 +1,5 @@
 import tensorflow as tf
+import tensorflow.keras.backend as B
 
 def window_partition(x, window_size):
     _, height, width, channels = x.shape
@@ -21,3 +22,6 @@ def window_reverse(windows, window_size, height, width, channels):
     x = tf.transpose(x, perm=(0, 1, 3, 2, 4, 5))
     x = tf.reshape(x, shape=(-1, height, width, channels))
     return x
+
+def gelu(x):
+    return 0.5 * x * (1 + B.tanh(x * 0.7978845608 * (1 + 0.044715 * x * x)))

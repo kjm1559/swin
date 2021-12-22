@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
-from utils import DropPath, window_partition, window_reverse
+from source.utils import DropPath, window_partition, window_reverse, gelu
 
 class DropPath(layers.Layer):
     def __init__(self, drop_prob=None, **kwargs):
@@ -100,7 +100,7 @@ class WindowAttention(layers.Layer):
 
         self.relative_position_index = tf.Variable(
             initial_value=tf.convert_to_tensor(relative_position_index),
-            trainalbe=False,
+            trainable=False,
         )
     
     def call(self, x, mask=None):
@@ -183,7 +183,7 @@ class SwinTransformer(layers.Layer):
         self.mlp = keras.Sequential(
             [
                 layers.Dense(num_mlp),
-                layers.Activation(keras.activations.gelu),
+                layers.Activation(gelu),
                 layers.Dropout(dropout_rate),
                 layers.Dense(dim),
                 layers.Dropout(dropout_rate)
@@ -207,7 +207,7 @@ class SwinTransformer(layers.Layer):
             w_slices = (
                 slice(0, -self.window_size),
                 slice(-self.window_size, -self.shift_size),
-                slice(-self.shift_zie, None),
+                slice(-self.shift_size, None),
             )
             mask_array = np.zeros((1, height, width, 1))
             count = 0
@@ -242,7 +242,7 @@ class SwinTransformer(layers.Layer):
 
         x_windows = window_partition(shifted_x, self.window_size)
         x_windows = tf.reshape(
-            x_windows, shape=(-1, self.window_size * self.windowsize, channels)
+            x_windows, shape=(-1, self.window_size * self.window_size, channels)
         )
         attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
@@ -285,8 +285,12 @@ def build_swin_model(
     num_classes
 ):
     input = layers.Input(input_shape)
-    x = layers.RandomCrop(image_dimension, image_dimension)(input)
-    x = layers.RandomFlip("horizontal")(x)
+    if tf.__version__ == '2.7.0':
+        x = layers.RandomCrop(image_dimension, image_dimension)(input)
+        x = layers.RandomFlip("horizontal")(x)
+    else:
+        x = layers.experimental.preprocessing.RandomCrop(image_dimension, image_dimension)(input)
+        x = layers.experimental.preprocessing.RandomFlip("horizontal")(x)
     x = PatchExtract(patch_size)(x)
     x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim)(x)
     x = SwinTransformer(
@@ -310,7 +314,7 @@ def build_swin_model(
         dropout_rate=dropout_rate,
     )(x)
     x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
-    x = layers.GlobalAveragePooling1D()(x)
+    x = layers.GlobalAveragePooling2D()(x)
     output = layers.Dense(num_classes, activation="softmax")(x)
     model = keras.Model(input, output)
     return model
