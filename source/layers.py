@@ -65,7 +65,7 @@ class PatchMerging(layers.Layer):
         x2 = x[:, 0::2, 1::2, :]
         x3 = x[:, 1::2, 1::2, :]
         x = tf.concat((x0, x1, x2, x3), axis=-1)
-        x = tf.reshape(x, shape=(-1, (height // 2) * (width // 2), 4, C))
+        x = tf.reshape(x, shape=(-1, (height // 2) * (width // 2), 4 * C))
         return self.linear_trans(x)
 
 class WindowAttention(layers.Layer):
@@ -147,6 +147,75 @@ class WindowAttention(layers.Layer):
         x_qkv = self.proj(x_qkv)
         x_qkv = self.dropout(x_qkv)
         return x_qkv
+
+class WindowAttentionV2(WindowAttention):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=True, dropout_rate=0.0, **kwargs):
+        super(WindowAttentionV2, self).__init__(dim, window_size, num_heads, qkv_bias, dropout_rate, **kwargs)
+        self.cpb = keras.Sequential(
+            [
+                layers.Dense(512),
+                layers.Activation(gelu),
+                layers.Dropout(dropout_rate),
+                layers.Dense(num_heads),
+                layers.Dropout(dropout_rate)
+            ]
+        )
+        
+    def build(self, input_shape):
+        super(WindowAttentionV2, self).build(input_shape)
+        self.tau = self.add_weight(
+            shape=(self.num_heads, self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1]),
+            initializer=tf.initializers.Zeros(),
+            trainable=True,
+        )
+        coords_h = np.arange(self.window_size[0])
+        coords_w = np.arange(self.window_size[1])
+        coords_matrix = np.meshgrid(coords_h, coords_w, indexing='ij')
+        coords = np.stack(coords_matrix)
+        coords_flatten = coords.reshape(2, -1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.transpose([1, 2, 0])
+        self.log_relative_position_index = tf.math.sign(tf.cast(relative_coords, dtype='float32')) * tf.math.log(tf.abs(tf.cast(relative_coords, dtype='float32')) + 1)
+        
+    def call(self, x, mask=None):
+        _, size, channels = x.shape
+        head_dim = channels // self.num_heads
+        x_qkv = self.qkv(x)
+        x_qkv = tf.reshape(x_qkv, shape=(-1, size, 3, self.num_heads, head_dim))
+        x_qkv = tf.transpose(x_qkv, perm=(2, 0, 3, 1, 4))
+        q, k, v = x_qkv[0], x_qkv[1], x_qkv[2]
+        q = q * self.scale
+        qk = tf.linalg.matmul(q, k, transpose_b=True)
+        q2 = tf.expand_dims(tf.sqrt(tf.reduce_sum(q * q, -1)), 3)
+        k2 = tf.expand_dims(tf.sqrt(tf.reduce_sum(k * k, -1)), 3)
+        attn = qk/tf.linalg.matmul(q2, k2, transpose_b=True)
+        attn /= self.tau + 0.01
+        relative_position_bias = self.cpb(self.log_relative_position_index)
+        relative_position_bias = tf.reshape(relative_position_bias,
+            (-1, self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1])
+        )
+        attn = attn + tf.expand_dims(relative_position_bias, axis=0)
+
+        if mask is not None:
+            nW = mask.get_shape()[0]
+            mask_float = tf.cast(
+                tf.expand_dims(tf.expand_dims(mask, axis=1), axis=0), tf.float32
+            )
+            attn = (
+                tf.reshape(attn, shape=(-1, nW, self.num_heads, size, size)) + mask_float
+            )
+            attn = tf.reshape(attn, shape=(-1, self.num_heads, size, size))
+            attn = keras.activations.softmax(attn, axis=-1)
+        else:
+            attn = keras.activations.softmax(attn, axis=-1)
+        attn = self.dropout(attn)
+
+        x_qkv = attn @ v
+        x_qkv = tf.transpose(x_qkv, perm=(0, 2, 1, 3))
+        x_qkv = tf.reshape(x_qkv, shape=(-1, size, channels))
+        x_qkv = self.proj(x_qkv)
+        x_qkv = self.dropout(x_qkv)
+        return x_qkv        
 
 class SwinTransformer(layers.Layer):
     def __init__(
@@ -269,6 +338,71 @@ class SwinTransformer(layers.Layer):
         x = x_skip + x
         return x
 
+class SwinTransformerV2(SwinTransformer):
+    def __init__(
+        self,
+        dim, 
+        num_patch, 
+        num_heads, 
+        window_size=7, 
+        shift_size=0, 
+        num_mlp=1024, 
+        qkv_bias=True,
+        dropout_rate=0.,
+        **kwargs,
+    ):
+        super(SwinTransformerV2, self).__init__(dim, num_patch, num_heads, window_size, shift_size, num_mlp, qkv_bias, dropout_rate, **kwargs)
+        self.attn = WindowAttentionV2(
+            dim, 
+            window_size=(self.window_size, self.window_size),
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            dropout_rate=dropout_rate,
+        )
+    
+    def call(self, x):
+        height, width = self.num_patch
+        _, num_patches_before, channels = x.shape
+        x_skip = x
+        
+        x = tf.reshape(x, shape=(-1, height, width, channels))
+        if self.shift_size > 0:
+            shifted_x = tf.roll(
+                x, shift=[-self.shift_size, -self.shift_size], axis=[1, 2]
+            )
+        else:
+            shifted_x = x
+
+        x_windows = window_partition(shifted_x, self.window_size)
+        x_windows = tf.reshape(
+            x_windows, shape=(-1, self.window_size * self.window_size, channels)
+        )
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+
+        attn_windows = tf.reshape(
+            attn_windows, shape=(-1, self.window_size, self.window_size, channels)
+        )
+        shifted_x = window_reverse(
+            attn_windows, self.window_size, height, width, channels
+        )
+        if self.shift_size > 0:
+            x = tf.roll(
+                shifted_x, shift=[self.shift_size, self.shift_size], axis=[1, 2]
+            )
+        else:
+            x = shifted_x
+
+        x = tf.reshape(x, shape=(-1, height * width, channels))
+        x = self.drop_path(x)
+        x = self.norm1(x)
+        x = x_skip + x
+        x_skip = x
+        x = self.mlp(x)
+        x = self.drop_path(x)
+        x = self.norm2(x)
+        x = x_skip + x
+        return x
+    
 def build_swin_model(
     input_shape,
     image_dimension,
@@ -315,6 +449,132 @@ def build_swin_model(
     )(x)
     x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
     x = layers.GlobalAveragePooling2D()(x)
+    output = layers.Dense(num_classes, activation="softmax")(x)
+    model = keras.Model(input, output)
+    return model
+
+def swin_block(x, embed_dim, num_patch_x, num_patch_y, num_heads, window_size, shift_size, num_mlp, qkv_bias, dropout_rate, count=1, v_flag='v2'):
+    for i in range(count * 2):
+        if i % 2 == 0:
+            tmp_shift_size = 0 
+        else:
+            tmp_shift_size = shift_size
+        if v_flag == 'v1':
+            x = SwinTransformer(
+                dim=embed_dim,
+                num_patch=(num_patch_x, num_patch_y),
+                num_heads=num_heads,
+                window_size=window_size,
+                shift_size=tmp_shift_size,
+                num_mlp=num_mlp,
+                qkv_bias=qkv_bias,
+                dropout_rate=dropout_rate,
+            )(x)
+        else:
+            x = SwinTransformerV2(
+                dim=embed_dim,
+                num_patch=(num_patch_x, num_patch_y),
+                num_heads=num_heads,
+                window_size=window_size,
+                shift_size=tmp_shift_size,
+                num_mlp=num_mlp,
+                qkv_bias=qkv_bias,
+                dropout_rate=dropout_rate,
+            )(x)
+    return x
+    
+
+def build_swin_T_model(
+    input_shape,
+    image_dimension,
+    patch_size,
+    num_patch_x,
+    num_patch_y,
+    embed_dim,
+    num_heads,
+    window_size,
+    num_mlp,
+    qkv_bias,
+    dropout_rate,
+    shift_size,
+    num_classes,
+    v_flag = 'v2',
+):
+    input = layers.Input(input_shape)
+    #tf.image.resize(input, (64, 64))
+    if tf.__version__ == '2.7.0':
+        x = layers.Resizing((64, 64), "bilinear")(input)
+        x = layers.RandomCrop(image_dimension, image_dimension)(x)
+        x = layers.RandomFlip("horizontal")(x)
+    else:
+        x = layers.experimental.preprocessing.Resizing(64, 64, "bilinear")(input)
+        x = layers.experimental.preprocessing.RandomCrop(image_dimension, image_dimension)(x)
+        x = layers.experimental.preprocessing.RandomFlip("horizontal")(x)
+    x = PatchExtract(patch_size)(x)
+    x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim)(x)
+    print(f'patch embedding : {x.shape}')
+    # stage1
+    x = swin_block(x, 
+        embed_dim,
+        num_patch_x, num_patch_y,
+        num_heads,
+        window_size,
+        shift_size,
+        num_mlp,
+        qkv_bias,
+        dropout_rate,
+    )
+
+    # stage2
+    print(f'stage1 x shape : {x.shape}')
+    x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
+    print(f'merging x shape : {x.shape}')
+    x = swin_block(x, 
+        embed_dim * 2,
+        num_patch_x//2, num_patch_y//2,
+        num_heads,
+        window_size,
+        shift_size,
+        num_mlp,
+        qkv_bias,
+        dropout_rate,
+    )
+    
+    # stage3
+    print(f'stage2 x shape : {x.shape}')
+    x = PatchMerging((num_patch_x//2, num_patch_y//2), embed_dim=embed_dim*2)(x)
+    print(f'merging x shape : {x.shape}')
+    x = swin_block(x, 
+        embed_dim * 4,
+        num_patch_x//4, num_patch_y//4,
+        num_heads,
+        window_size,
+        shift_size,
+        num_mlp,
+        qkv_bias,
+        dropout_rate,
+        3,
+    )
+    
+    # stage4
+    print(f'stage3 x shape : {x.shape}')
+    x = PatchMerging((num_patch_x//4, num_patch_y//4), embed_dim=embed_dim*4)(x)
+    print(f'merging x shape : {x.shape}')
+    x = swin_block(x, 
+        embed_dim * 8,
+        num_patch_x//8, num_patch_y//8,
+        num_heads,
+        window_size,
+        shift_size,
+        num_mlp,
+        qkv_bias,
+        dropout_rate,
+    )
+
+    print(f'stage4 x shape : {x.shape}')
+    
+#     x = PatchMerging((num_patch_x//8, num_patch_y//8), embed_dim=embed_dim * 8)(x)
+    x = layers.GlobalAveragePooling1D()(x)
     output = layers.Dense(num_classes, activation="softmax")(x)
     model = keras.Model(input, output)
     return model
