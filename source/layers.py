@@ -154,7 +154,7 @@ class WindowAttentionV2(WindowAttention):
         self.cpb = keras.Sequential(
             [
                 layers.Dense(512),
-                layers.Activation(gelu),
+                layers.Activation('relu'),
                 layers.Dropout(dropout_rate),
                 layers.Dense(num_heads),
                 layers.Dropout(dropout_rate)
@@ -162,7 +162,6 @@ class WindowAttentionV2(WindowAttention):
         )
         
     def build(self, input_shape):
-        super(WindowAttentionV2, self).build(input_shape)
         self.tau = self.add_weight(
             shape=(self.num_heads, self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1]),
             initializer=tf.initializers.Zeros(),
@@ -349,6 +348,7 @@ class SwinTransformerV2(SwinTransformer):
         num_mlp=1024, 
         qkv_bias=True,
         dropout_rate=0.,
+        mlp_ratio=4,
         **kwargs,
     ):
         super(SwinTransformerV2, self).__init__(dim, num_patch, num_heads, window_size, shift_size, num_mlp, qkv_bias, dropout_rate, **kwargs)
@@ -358,6 +358,15 @@ class SwinTransformerV2(SwinTransformer):
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             dropout_rate=dropout_rate,
+        )
+        self.mlp = keras.Sequential(
+            [
+                layers.Dense(int(dim * mlp_ratio)),
+                layers.Activation(gelu),
+                layers.Dropout(dropout_rate),
+                layers.Dense(dim),
+                layers.Dropout(dropout_rate)
+            ]
         )
     
     def call(self, x):
@@ -517,7 +526,7 @@ def build_swin_T_model(
     x = swin_block(x, 
         embed_dim,
         num_patch_x, num_patch_y,
-        num_heads,
+        3,
         window_size,
         shift_size,
         num_mlp,
@@ -532,7 +541,7 @@ def build_swin_T_model(
     x = swin_block(x, 
         embed_dim * 2,
         num_patch_x//2, num_patch_y//2,
-        num_heads,
+        6,
         window_size,
         shift_size,
         num_mlp,
@@ -547,7 +556,7 @@ def build_swin_T_model(
     x = swin_block(x, 
         embed_dim * 4,
         num_patch_x//4, num_patch_y//4,
-        num_heads,
+        12,
         window_size,
         shift_size,
         num_mlp,
@@ -563,7 +572,7 @@ def build_swin_T_model(
     x = swin_block(x, 
         embed_dim * 8,
         num_patch_x//8, num_patch_y//8,
-        num_heads,
+        24,
         window_size,
         shift_size,
         num_mlp,
