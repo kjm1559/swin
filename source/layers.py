@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 import numpy as np
-from source.utils import DropPath, window_partition, window_reverse, gelu
+from source.utils import window_partition, window_reverse, gelu
 
 class DropPath(layers.Layer):
     def __init__(self, drop_prob=None, **kwargs):
