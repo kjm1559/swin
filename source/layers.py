@@ -42,19 +42,19 @@ class PatchEmbedding(layers.Layer):
     def __init__(self, num_patch, embed_dim, **kwargs):
         super(PatchEmbedding, self).__init__(**kwargs)
         self.num_patch = num_patch
-        self.proj = layers.Dense(embed_dim)
-        self.pos_embed = layers.Embedding(input_dim=num_patch, output_dim=embed_dim)
+        self.proj = layers.Dense(embed_dim, name='projection')
+        self.pos_embed = layers.Embedding(input_dim=num_patch, output_dim=embed_dim, name='pos_embed')
 
     def call(self, patch):
         pos = tf.range(start=0, limit=self.num_patch, delta=1)
         return self.proj(patch) + self.pos_embed(pos)
 
 class PatchMerging(layers.Layer):
-    def __init__(self, num_patch, embed_dim):
-        super(PatchMerging, self).__init__()
+    def __init__(self, num_patch, embed_dim, **kwargs):
+        super(PatchMerging, self).__init__(**kwargs)
         self.num_patch = num_patch
         self.embed_dim = embed_dim
-        self.linear_trans = layers.Dense(2 * embed_dim, use_bias=False)
+        self.linear_trans = layers.Dense(2 * embed_dim, use_bias=False, name='linear_trans')
 
     def call(self, x):
         height, width = self.num_patch
@@ -435,7 +435,7 @@ def build_swin_model(
         x = layers.experimental.preprocessing.RandomCrop(image_dimension, image_dimension)(input)
         x = layers.experimental.preprocessing.RandomFlip("horizontal")(x)
     x = PatchExtract(patch_size)(x)
-    x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim)(x)
+    x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim, name='patch_embedding')(x)
     x = SwinTransformer(
         dim=embed_dim,
         num_patch=(num_patch_x, num_patch_y),
@@ -457,7 +457,7 @@ def build_swin_model(
         dropout_rate=dropout_rate,
     )(x)
     x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
-    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.GlobalAveragePooling1D()(x)
     output = layers.Dense(num_classes, activation="softmax")(x)
     model = keras.Model(input, output)
     return model
@@ -512,15 +512,16 @@ def build_swin_T_model(
     input = layers.Input(input_shape)
     #tf.image.resize(input, (64, 64))
     if tf.__version__ == '2.7.0':
-        x = layers.Resizing((64, 64), "bilinear")(input)
+        x = layers.Resizing((image_dimension, image_dimension), "bilinear")(input)
         x = layers.RandomCrop(image_dimension, image_dimension)(x)
         x = layers.RandomFlip("horizontal")(x)
     else:
-        x = layers.experimental.preprocessing.Resizing(64, 64, "bilinear")(input)
-        x = layers.experimental.preprocessing.RandomCrop(image_dimension, image_dimension)(x)
-        x = layers.experimental.preprocessing.RandomFlip("horizontal")(x)
+        x = layers.experimental.preprocessing.Resizing(image_dimension, image_dimension, "bilinear")(input)
+#         x = layers.experimental.preprocessing.RandomCrop(image_dimension, image_dimension)(x)
+#         x = layers.experimental.preprocessing.RandomFlip("horizontal")(x)
     x = PatchExtract(patch_size)(x)
-    x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim)(x)
+    print(f'patch extract shape: {x.shape}')
+    x = PatchEmbedding(num_patch_x * num_patch_y, embed_dim, name='patch_embedding')(x)
     print(f'patch embedding : {x.shape}')
     # stage1
     x = swin_block(x, 
@@ -536,7 +537,7 @@ def build_swin_T_model(
 
     # stage2
     print(f'stage1 x shape : {x.shape}')
-    x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim)(x)
+    x = PatchMerging((num_patch_x, num_patch_y), embed_dim=embed_dim, name='patch_merging1')(x)
     print(f'merging x shape : {x.shape}')
     x = swin_block(x, 
         embed_dim * 2,
@@ -551,7 +552,7 @@ def build_swin_T_model(
     
     # stage3
     print(f'stage2 x shape : {x.shape}')
-    x = PatchMerging((num_patch_x//2, num_patch_y//2), embed_dim=embed_dim*2)(x)
+    x = PatchMerging((num_patch_x//2, num_patch_y//2), embed_dim=embed_dim*2, name='patch_merging2')(x)
     print(f'merging x shape : {x.shape}')
     x = swin_block(x, 
         embed_dim * 4,
@@ -567,7 +568,7 @@ def build_swin_T_model(
     
     # stage4
     print(f'stage3 x shape : {x.shape}')
-    x = PatchMerging((num_patch_x//4, num_patch_y//4), embed_dim=embed_dim*4)(x)
+    x = PatchMerging((num_patch_x//4, num_patch_y//4), embed_dim=embed_dim*4, name='patch_merging3')(x)
     print(f'merging x shape : {x.shape}')
     x = swin_block(x, 
         embed_dim * 8,
@@ -582,7 +583,7 @@ def build_swin_T_model(
 
     print(f'stage4 x shape : {x.shape}')
     
-#     x = PatchMerging((num_patch_x//8, num_patch_y//8), embed_dim=embed_dim * 8)(x)
+    x = PatchMerging((num_patch_x//8, num_patch_y//8), embed_dim=embed_dim * 8, name='patch_merging4')(x)
     x = layers.GlobalAveragePooling1D()(x)
     output = layers.Dense(num_classes, activation="softmax")(x)
     model = keras.Model(input, output)
